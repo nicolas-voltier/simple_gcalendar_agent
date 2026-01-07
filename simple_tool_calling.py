@@ -17,7 +17,7 @@ from llama_index.tools.mcp import BasicMCPClient
 # Configuration
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8080/sse")
 OPENAI_MODEL = "gpt-5-mini"
-OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "medium")
+OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "low")
 OPENAI_VERBOSITY = os.getenv("OPENAI_VERBOSITY", "low")
 
 # MCP Client and available tools
@@ -226,7 +226,11 @@ def validate_openai_response(response: Dict[str, Any]) -> bool:
         return False
     
     if len(response["function_calls"]) == 0:
-        print("ERROR: 'function_calls' must contain at least one function call")
+        # If no function calls, show the AI's reasoning for why it couldn't act
+        print("ℹ️  No action to perform.")
+        if "reasoning" in response:
+            print("🤔 REASONING:")
+            print(f"   {response['reasoning']}\n")
         return False
     
     for i, func_call in enumerate(response["function_calls"]):
