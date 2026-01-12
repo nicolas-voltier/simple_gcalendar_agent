@@ -25,6 +25,7 @@ mcp_client: BasicMCPClient = None
 AVAILABLE_FUNCTIONS = {}
 
 
+
 def get_system_prompt() -> str:
     """Generate the system prompt with Task, Context, and Output format."""
     if not AVAILABLE_FUNCTIONS:
@@ -43,6 +44,14 @@ You are managing a google calendar for a user. Act as per his latest request.
 
 Available calendar functions:
 {functions_description}
+## Workflow
+
+1. Analyze the user request and current context
+2. Decide which functions to call
+3. After execution, you'll receive results
+4. Based on results, decide if more actions are needed
+5. If more actions are needed, repeat the process
+6. If no more actions are needed, return the final result
 
 ## Output Format
 
@@ -132,10 +141,13 @@ async def load_mcp_tools():
         # Extract tools list from result
         # ListToolsResult may have a 'tools' attribute or be iterable
         if hasattr(tools_result, 'tools'):
+            print(f"   Got tools result, tools: {tools_result.tools}")
             tools_list = tools_result.tools
         elif isinstance(tools_result, list):
+            print(f"   Got tools result, list: {tools_result}")
             tools_list = tools_result
         else:
+            print(f"   Got tools result, else: {tools_result}")
             # Try iterating directly
             tools_list = list(tools_result) if tools_result else []
         
@@ -256,7 +268,109 @@ def validate_openai_response(response: Dict[str, Any]) -> bool:
     
     return True
 
+########### Agentic loop
+def run_agent_loop(client: OpenAI, user_request: str, max_iterations: int = 5):
+    """
+    Boucle agentic qui permet à l'agent de voir les résultats et décider des actions suivantes.
+    
+    Args:
+        client: OpenAI client
+        user_request: Requête initiale de l'utilisateur
+        max_iterations: Nombre maximum d'itérations
+        
+    Returns:
+        List of all results from function executions
+    """
+    # Pour la première itération, on utilise la requête originale
+    current_prompt = user_request
+    all_results = []
+    conversation_context = []  # Garde trace de ce qui s'est passé
+    
+    for iteration in range(max_iterations):
+        print(f"\n{'='*70}")
+        print(f"🔄 ITERATION {iteration + 1}/{max_iterations}")
+        print(f"{'='*70}\n")
+        
+        # Appel à OpenAI avec le prompt courant
+        try:
+            response = call_openai(client, current_prompt)
+        except Exception as e:
+            print_error(f"Failed to get response from OpenAI: {e}")
+            break
+        
+        # Valider la réponse
+        if not validate_openai_response(response):
+            break
+        
+        function_calls = response["function_calls"]
+        reasoning = response["reasoning"]
+        
+        # Afficher le raisonnement
+        print_reasoning(reasoning)
+        
+        # Si pas d'actions, l'agent a terminé
+        if len(function_calls) == 0:
+            print("✅ AGENT COMPLETED THE TASK\n")
+            break
+        
+        # Afficher les actions planifiées
+        print_action(function_calls)
+        
+        # Exécuter les fonctions et collecter les résultats
+        iteration_results = []
+        for func_call in function_calls:
+            try:
+                result = call_mcp_tool(func_call["name"], func_call["arguments"])
+                iteration_results.append({
+                    "function": func_call["name"],
+                    "arguments": func_call["arguments"],
+                    "result": result,
+                    "success": True
+                })
+                all_results.append(iteration_results[-1])
+                print_result(result)
+            except Exception as e:
+                error_msg = str(e)
+                iteration_results.append({
+                    "function": func_call["name"],
+                    "arguments": func_call["arguments"],
+                    "error": error_msg,
+                    "success": False
+                })
+                all_results.append(iteration_results[-1])
+                print_error(error_msg)
+        
+        # Ajouter à l'historique contextuel
+        conversation_context.append({
+            "iteration": iteration + 1,
+            "actions": function_calls,
+            "results": iteration_results
+        })
+        
+        # Construire le nouveau prompt pour la prochaine itération
+        context_summary = "\n\n".join([
+            f"Iteration {ctx['iteration']}:\n"
+            f"Actions taken: {json.dumps(ctx['actions'], indent=2)}\n"
+            f"Results: {json.dumps(ctx['results'], indent=2)}"
+            for ctx in conversation_context
+        ])
+        
+        current_prompt = f"""Original user request: {user_request}
 
+Previous actions and results:
+{context_summary}
+
+Based on these results, what should be done next to complete the user's request?
+If the task is complete, return empty function_calls: []"""
+    
+    if iteration == max_iterations - 1:
+        print(f"\n⚠️  Warning: Reached maximum iterations ({max_iterations})\n")
+        
+        print_separator()
+    
+    return all_results
+
+########### Print functions
 def print_separator():
     """Print a visual separator between requests."""
     print("\n" + "=" * 70 + "\n")
@@ -331,57 +445,20 @@ def main():
                 
                 # Call OpenAI to interpret request
                 try:
-                    openai_response = call_openai(client, user_request)
-                except Exception as e:
-                    print_error(f"Failed to get response from OpenAI: {e}")
-                    continue
-                
-                # Validate response
-                if not validate_openai_response(openai_response):
-                    continue
-                
-                # Extract components
-                function_calls = openai_response["function_calls"]
-                reasoning = openai_response["reasoning"]
-                
-                # Display reasoning
-                print_reasoning(reasoning)
-                
-                # Display action
-                print_action(function_calls)
-                
-                # Execute all function calls
-                for i, func_call in enumerate(function_calls):
-                    function_name = func_call["name"]
-                    arguments = func_call["arguments"]
-                    
-                    if len(function_calls) > 1:
-                        print(f"Executing function call {i+1} of {len(function_calls)}...\n")
-                    
-                    # Call MCP function
-                    try:
-                        result = call_mcp_tool(function_name, arguments)
-                        print_result(result)
-                    except Exception as e:
-                        print_error(f"Failed to execute MCP function '{function_name}': {e}")
-                        # Continue with next function call if there are multiple
-                        if i < len(function_calls) - 1:
-                            continue
-                        else:
-                            break
-                
-            except KeyboardInterrupt:
-                print("\n\nInterrupted by user. Goodbye!")
-                break
-            except EOFError:
-                print("\n\nGoodbye!")
-                break
-    
+                    run_agent_loop(client, user_request, max_iterations=5)
+                except KeyboardInterrupt:
+                    print("\n\nInterrupted by user. Goodbye!")
+                    break
+                except EOFError:
+                    print("\n\nGoodbye!")
+                    break
+            except Exception as e:
+                print_error(f"Unexpected error: {e}")
+                continue  # Continue the loop instead of exiting
     except Exception as e:
-        print_error(f"Unexpected error: {e}")
+        print_error(f"Fatal error: {e}")
         sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
-

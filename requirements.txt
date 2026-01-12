@@ -1,4 +1,5 @@
 openai>=1.0.0
+openai-agents>=1.0.0
 python-dotenv>=1.0.0
 httpx>=0.27.0
 llama-index-tools-mcp>=0.1.0
